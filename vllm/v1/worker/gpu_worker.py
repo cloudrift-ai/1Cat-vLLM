@@ -220,9 +220,9 @@ class Worker(WorkerBase):
             yield
             return
 
-        set_allocator_settings = getattr(torch._C,
-                                         "_accelerator_setAllocatorSettings",
-                                         None)
+        set_allocator_settings = getattr(
+            torch._C, "_accelerator_setAllocatorSettings", None
+        )
         if set_allocator_settings is None:
             yield
             return
@@ -713,6 +713,8 @@ class Worker(WorkerBase):
                 skip_eplb=True,
                 cudagraph_runtime_mode=CUDAGraphMode.NONE,
             )
+            assert hidden_states is not None
+            assert last_hidden_states is not None
             if self.model_runner.is_pooling_model:
                 self.model_runner._dummy_pooler_run(hidden_states)
             else:

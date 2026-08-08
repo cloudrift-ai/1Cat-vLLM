@@ -10165,7 +10165,7 @@ class GPUModelRunner(
         num_active_loras: int = 0,
         profile_seq_lens: int | None = None,
         batch_descriptor_override: BatchDescriptor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
         """
         Run a dummy forward pass to warm up/profile run or capture the
         CUDA graph for the model.
@@ -10639,6 +10639,12 @@ class GPUModelRunner(
             self.eplb_step(is_dummy=True, is_profile=is_profile)
             _sm70_profile_trace("_dummy_run eplb exit")
 
+        # Non-last PP ranks return IntermediateTensors from the model forward,
+        # not hidden states that can be indexed for sampling.
+        if not get_pp_group().is_last_rank:
+            _sm70_profile_trace("_dummy_run return non-last PP rank")
+            return None, None
+
         logit_indices = np.cumsum(num_scheduled_tokens) - 1
         logit_indices_device = torch.from_numpy(logit_indices).to(
             self.device, non_blocking=True
@@ -10916,12 +10922,14 @@ class GPUModelRunner(
         hidden_states, last_hidden_states = self._dummy_run(
             self.max_num_tokens, is_profile=True
         )
-        _sm70_profile_trace(
-            "profile_run dummy_run exit hidden_shape=%s last_hidden_shape=%s",
-            tuple(hidden_states.shape),
-            tuple(last_hidden_states.shape),
-        )
         if get_pp_group().is_last_rank:
+            assert hidden_states is not None
+            assert last_hidden_states is not None
+            _sm70_profile_trace(
+                "profile_run dummy_run exit hidden_shape=%s last_hidden_shape=%s",
+                tuple(hidden_states.shape),
+                tuple(last_hidden_states.shape),
+            )
             if self.is_pooling_model:
                 _sm70_profile_trace("profile_run pooler enter")
                 output = self._dummy_pooler_run(hidden_states)
