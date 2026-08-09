@@ -87,6 +87,24 @@ def initialize_kv_cache(runner: GPUModelRunner):
     runner.initialize_attn_backend(kv_cache_config)
 
 
+def test_profile_run_non_last_pp_rank_accepts_missing_sampling_states(monkeypatch):
+    runner = GPUModelRunner.__new__(GPUModelRunner)
+    runner.max_num_tokens = 8
+    runner.scheduler_config = SimpleNamespace(max_num_seqs=1)
+    runner.supports_mm_inputs = False
+    runner._dummy_run = Mock(return_value=(None, None))
+    runner._sync_device = Mock()
+    runner.encoder_cache = {}
+
+    pp_group = SimpleNamespace(is_last_rank=False)
+    monkeypatch.setattr(gpu_model_runner_module, "get_pp_group", lambda: pp_group)
+
+    runner.profile_run()
+
+    runner._dummy_run.assert_called_once_with(8, is_profile=True)
+    runner._sync_device.assert_called_once_with()
+
+
 def get_vllm_config():
     model_config = ModelConfig(
         model="facebook/opt-125m",
