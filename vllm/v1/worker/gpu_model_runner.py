@@ -978,6 +978,15 @@ def _copy_pooler_output_to_cpu(
     return pooler_output
 
 
+def _select_dummy_run_hidden_states(
+    hidden_states: torch.Tensor | IntermediateTensors,
+    logit_indices: torch.Tensor,
+) -> torch.Tensor | None:
+    if isinstance(hidden_states, IntermediateTensors):
+        return None
+    return hidden_states[logit_indices]
+
+
 class AsyncGPUPoolingModelRunnerOutput(AsyncModelRunnerOutput):
     def __init__(
         self,
@@ -10180,7 +10189,7 @@ class GPUModelRunner(
         num_active_loras: int = 0,
         profile_seq_lens: int | None = None,
         batch_descriptor_override: BatchDescriptor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor | IntermediateTensors, torch.Tensor | None]:
         """
         Run a dummy forward pass to warm up/profile run or capture the
         CUDA graph for the model.
@@ -10658,12 +10667,20 @@ class GPUModelRunner(
         logit_indices_device = torch.from_numpy(logit_indices).to(
             self.device, non_blocking=True
         )
+        last_hidden_states = _select_dummy_run_hidden_states(
+            hidden_states, logit_indices_device
+        )
         _sm70_profile_trace(
-            "_dummy_run return hidden_shape=%s sampled_count=%s",
-            tuple(hidden_states.shape),
+            "_dummy_run return hidden_type=%s last_hidden_shape=%s sampled_count=%s",
+            type(hidden_states).__name__,
+            (
+                tuple(last_hidden_states.shape)
+                if last_hidden_states is not None
+                else None
+            ),
             len(logit_indices),
         )
-        return hidden_states, hidden_states[logit_indices_device]
+        return hidden_states, last_hidden_states
 
     @torch.inference_mode()
     def _dummy_sampler_run(
@@ -10932,16 +10949,22 @@ class GPUModelRunner(
             self.max_num_tokens, is_profile=True
         )
         _sm70_profile_trace(
-            "profile_run dummy_run exit hidden_shape=%s last_hidden_shape=%s",
-            tuple(hidden_states.shape),
-            tuple(last_hidden_states.shape),
+            "profile_run dummy_run exit hidden_type=%s last_hidden_shape=%s",
+            type(hidden_states).__name__,
+            (
+                tuple(last_hidden_states.shape)
+                if last_hidden_states is not None
+                else None
+            ),
         )
         if get_pp_group().is_last_rank:
+            assert isinstance(hidden_states, torch.Tensor)
             if self.is_pooling_model:
                 _sm70_profile_trace("profile_run pooler enter")
                 output = self._dummy_pooler_run(hidden_states)
                 _sm70_profile_trace("profile_run pooler exit")
             else:
+                assert last_hidden_states is not None
                 _sm70_profile_trace("profile_run sampler enter")
                 output = self._dummy_sampler_run(last_hidden_states)
                 _sm70_profile_trace("profile_run sampler exit")
