@@ -26,6 +26,7 @@ from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
 from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
+from vllm.sequence import IntermediateTensors
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.system_utils import update_environment_variables
 from vllm.utils.torch_utils import set_random_seed
@@ -43,12 +44,26 @@ from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.worker.gpu_input_batch import InputBatch
-from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+from vllm.v1.worker.gpu_model_runner import (
+    GPUModelRunner,
+    _select_dummy_run_hidden_states,
+)
 from vllm.v1.worker.utils import select_common_block_size
 
 BLOCK_SIZE = 16
 NUM_BLOCKS = 10
 DEVICE_TYPE = current_platform.device_type
+
+
+def test_select_dummy_run_hidden_states():
+    hidden_states = torch.arange(12).reshape(4, 3)
+    logit_indices = torch.tensor([1, 3])
+
+    selected = _select_dummy_run_hidden_states(hidden_states, logit_indices)
+
+    assert torch.equal(selected, hidden_states[logit_indices])
+    intermediate_tensors = IntermediateTensors({"hidden_states": hidden_states})
+    assert _select_dummy_run_hidden_states(intermediate_tensors, logit_indices) is None
 
 
 def initialize_kv_cache(runner: GPUModelRunner):

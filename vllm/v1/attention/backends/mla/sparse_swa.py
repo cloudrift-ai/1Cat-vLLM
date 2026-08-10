@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
-from typing import ClassVar, cast
+from typing import Any, ClassVar, cast
 
 import torch
 
@@ -282,16 +282,16 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
             self.vllm_config.scheduler_config.max_num_batched_tokens
         )
 
-        # Handle MTP: adjust decode_threshold like the indexer does
+        # Keep the decode/prefill split identical to Indexer and FlashMLA.
+        # Parallel drafting carries two speculative branches, so its decode
+        # threshold is 1 + 2 * num_speculative_tokens rather than 1 + N.
+        self._init_reorder_batch_threshold(1, supports_spec_as_decode=True)
+        assert self.reorder_batch_threshold is not None
+        self.decode_threshold = self.reorder_batch_threshold
+
         spec_config = self.vllm_config.speculative_config
         self.num_speculative_tokens = (
             spec_config.num_speculative_tokens if spec_config else 0
-        )
-        # With MTP, decode can have query_len up to 1 + num_speculative_tokens.
-        # Must match the threshold used by the indexer and flashmla_sparse so
-        # that all backends agree on the decode/prefill split.
-        self.decode_threshold = (
-            self.reorder_batch_threshold + self.num_speculative_tokens
         )
 
         hf_config = self.vllm_config.model_config.hf_config
@@ -458,7 +458,7 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
             tile_sched_swaonly=tile_sched[_LAYER_TYPE_SWAONLY],
             tile_sched_c4a=tile_sched[_LAYER_TYPE_C4A],
             tile_sched_c128a=tile_sched[_LAYER_TYPE_C128A],
-            **deepseek_v4_fields,
+            **cast(Any, deepseek_v4_fields),
         )
 
     def build_tile_scheduler(
