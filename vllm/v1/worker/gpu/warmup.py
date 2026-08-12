@@ -25,13 +25,15 @@ def warmup_kernels(
     worker_execute_model: Callable[[SchedulerOutput], Any],
     worker_sample_tokens: Callable[[GrammarOutput | None], Any],
 ) -> None:
-    """Run two execute_model + sample_tokens iterations to JIT compile
+    """Run startup execute_model + sample_tokens iterations to JIT compile
     triton kernels. We must call the provided worker's execute_model for
     pipeline parallel coordination.
 
     The first iteration simulates a prefill with requests of
     2 + num_spec_steps prompt tokens each. The second iteration simulates
     a decode step with all requests generating 1 + num_spec_steps tokens.
+    A final single-request prefill covers the material short-prompt shape
+    used by the serving health check before JIT monitoring begins.
     """
     num_spec_steps = model_runner.num_speculative_steps
     # Use 1 + num_spec_steps + 1 tokens so the prefill batch's per-request
@@ -149,5 +151,37 @@ def warmup_kernels(
     cleanup_output = SchedulerOutput.make_empty()
     cleanup_output.finished_req_ids = set(req_ids)
     worker_execute_model(cleanup_output)
+
+    # The two-token prefill above intentionally maximizes request count, but
+    # Triton's attention and slot-mapping kernels specialize on the short
+    # prompt geometry. Warm the six-token shape used by the serving probe so
+    # the first real request cannot pay a request-time compilation penalty.
+    probe_len = min(
+        6 + num_spec_steps,
+        model_runner.scheduler_config.max_num_batched_tokens,
+    )
+    if probe_len > prompt_len:
+        probe_req_id = "_warmup_probe_"
+        probe_token_ids = [0] * probe_len
+        probe_block_counts = [cdiv(probe_len, bs) for bs in group_block_sizes]
+        next_block_id = 1
+        probe_req = NewRequestData.from_request(
+            Request(probe_req_id, probe_token_ids, sampling_params, pooling_params),
+            block_ids=tuple(_alloc_blocks(n) for n in probe_block_counts),
+            prefill_token_ids=probe_token_ids,
+        )
+        probe_output = SchedulerOutput.make_empty()
+        probe_output.scheduled_new_reqs = [probe_req]
+        probe_output.num_scheduled_tokens = {probe_req_id: probe_len}
+        probe_output.total_num_scheduled_tokens = probe_len
+        probe_output.num_common_prefix_blocks = [0] * num_kv_cache_groups
+        worker_execute_model(probe_output)
+        if not model_runner.is_pooling_model:
+            worker_sample_tokens(None)
+
+        probe_cleanup_output = SchedulerOutput.make_empty()
+        probe_cleanup_output.finished_req_ids = {probe_req_id}
+        worker_execute_model(probe_cleanup_output)
+
     model_runner.kv_connector.set_disabled(False)
     torch.accelerator.synchronize()
