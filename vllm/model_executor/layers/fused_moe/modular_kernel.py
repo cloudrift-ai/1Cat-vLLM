@@ -1061,6 +1061,7 @@ class FusedMoEKernelModularImpl:
 
     def _allocate_buffers(
         self,
+        in_dtype: torch.dtype,
         out_dtype: torch.dtype,
         device: torch.device,
         M_chunk: int,
@@ -1076,7 +1077,8 @@ class FusedMoEKernelModularImpl:
         """
         Allocate temporary and output buffers for the fused experts op.
         Inputs:
-        - out_dtype: output type of workspace and output tensors.
+        - in_dtype: input and intermediate workspace type.
+        - out_dtype: final expert output type.
         - device: the device of the workspace and output tensors.
         See `workspace_shapes` for a description of the remainder of arguments.
         Returns a tuple of (workspace13, workspace2, output) tensors.
@@ -1084,7 +1086,7 @@ class FusedMoEKernelModularImpl:
         assert M_full > 0 and M_chunk > 0
 
         num_chunks = cdiv(M_full, M_chunk)
-        workspace_dtype = self.fused_experts.workspace_dtype(out_dtype)
+        workspace_dtype = self.fused_experts.workspace_dtype(in_dtype)
 
         # Get intermediate workspace shapes based off the chunked M size.
         workspace13_shape, workspace2_shape, _ = self.fused_experts.workspace_shapes(
@@ -1110,7 +1112,7 @@ class FusedMoEKernelModularImpl:
             activation,
         )
 
-        if num_chunks == 1:
+        if num_chunks == 1 and workspace_dtype == out_dtype:
             # We can reuse the memory between cache1 and cache3 because by the
             # time we need cache3, we're done with cache1.
             max_shape_size = max(prod(workspace13_shape), prod(fused_out_shape))
@@ -1191,6 +1193,11 @@ class FusedMoEKernelModularImpl:
         self,
         shared_experts: SharedExperts | None,
     ) -> bool:
+        if (
+            self.fused_experts.moe_config.out_dtype
+            != self.fused_experts.moe_config.in_dtype
+        ):
+            return False
         if shared_experts is not None:
             return False
         if envs.VLLM_SM70_DISABLE_UNQUANTIZED_MOE_INPLACE:
@@ -1213,6 +1220,11 @@ class FusedMoEKernelModularImpl:
         a1q: torch.Tensor,
         expert_tokens_meta: ExpertTokensMetadata | None,
     ) -> bool:
+        if (
+            self.fused_experts.moe_config.out_dtype
+            != self.fused_experts.moe_config.in_dtype
+        ):
+            return False
         if not envs.VLLM_SM70_UNQUANTIZED_MOE_0DOT3_FUNCTIONAL:
             return False
         if not envs.VLLM_SM70_UNQUANTIZED_MOE_0DOT3_CONFIG:
@@ -1382,10 +1394,13 @@ class FusedMoEKernelModularImpl:
         # low-latency kernels are always batched and can never run into
         # the tensor.numel() == 0 case.
         if M_full == 0:
-            return torch.empty_like(a1q, dtype=in_dtype)
+            return torch.empty_like(a1q, dtype=self.fused_experts.moe_config.out_dtype)
 
+        out_dtype = self.fused_experts.moe_config.out_dtype
+        assert out_dtype is not None
         workspace13, workspace2, fused_out = self._allocate_buffers(
             in_dtype,
+            out_dtype,
             a1q.device,
             chunk_size,
             M_full,
@@ -1575,7 +1590,10 @@ class FusedMoEKernelModularImpl:
             )
             output = hidden_states
         else:
-            output = torch.empty_like(hidden_states)
+            output = torch.empty_like(
+                hidden_states,
+                dtype=self.fused_experts.moe_config.out_dtype,
+            )
 
         local_num_experts = w1.shape[0]
         if global_num_experts == -1:

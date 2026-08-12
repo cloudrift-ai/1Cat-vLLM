@@ -75,6 +75,12 @@ def _permute_with_scratch_enabled() -> bool:
     )
 
 
+def _native_output_dtype_supported(
+    output: torch.Tensor, expert_output: torch.Tensor
+) -> bool:
+    return output.dtype == expert_output.dtype
+
+
 def _single_token_indexed_w2_enabled() -> bool:
     if not (
         envs.VLLM_SM70_FP8_MOE_SINGLE_TOKEN_INDEXED_W2_FASTPATH
@@ -368,11 +374,12 @@ class Fp8SM70MoEMethod(FusedMoEMethodBase):
         max_slots = persistent_tokens * top_k
         hidden_size = layer.sm70_hidden_logical_size
         num_experts = layer.sm70_num_experts
+        output_dtype = layer.moe_config.out_dtype or torch.float16
         layer._fp8_buf_max_tokens = persistent_tokens
         layer._fp8_buf_max_slots = max_slots
         layer._fp8_buf_top_k = top_k
         layer._fp8_buf_output = torch.empty(
-            persistent_tokens, hidden_size, dtype=torch.float16, device=device
+            persistent_tokens, hidden_size, dtype=output_dtype, device=device
         )
         layer._fp8_buf_permuted_input = torch.empty(
             max_slots, hidden_size, dtype=torch.float16, device=device
@@ -785,6 +792,7 @@ class Fp8SM70MoEMethod(FusedMoEMethodBase):
         device = layer._fp8_buf_output.device
         top_k = layer._fp8_buf_top_k
         hidden_size = layer.sm70_hidden_logical_size
+        output_dtype = layer.moe_config.out_dtype or torch.float16
         if self.use_permute_with_scratch:
             sort_workspace_size = torch.ops._moe_C.moe_permute_sort_workspace_size(
                 total_slots, layer.global_num_experts
@@ -802,7 +810,7 @@ class Fp8SM70MoEMethod(FusedMoEMethodBase):
             ]
         return {
             "output": torch.empty(
-                num_tokens, hidden_size, dtype=torch.float16, device=device
+                num_tokens, hidden_size, dtype=output_dtype, device=device
             ),
             "permuted_input": torch.empty(
                 total_slots, hidden_size, dtype=torch.float16, device=device
@@ -891,7 +899,9 @@ class Fp8SM70MoEMethod(FusedMoEMethodBase):
             reference_tensors = self._apply_batched_reference_for_compare(
                 layer, x, topk_weights, topk_ids_i32, buffers, top_k
             )
-        if self.compact_decomposed:
+        if self.compact_decomposed or not _native_output_dtype_supported(
+            output, buffers["sorted_output"]
+        ):
             _log_runtime_route_once(
                 "SM70 FP8 MoE legacy single-token exact-layout decomposed "
                 "compact path enabled (top_k=%d, experts=%d).",
@@ -1154,7 +1164,10 @@ class Fp8SM70MoEMethod(FusedMoEMethodBase):
                     layer.sm70_w2_n_dim,
                     self.group_size,
                 )
-            if _single_token_weighted_reduce_enabled():
+            if (
+                _single_token_weighted_reduce_enabled()
+                and _native_output_dtype_supported(output, buffers["sorted_output"])
+            ):
                 _log_runtime_route_once(
                     "SM70 FP8 MoE single-token weighted-reduce path enabled "
                     "(top_k=%d).",

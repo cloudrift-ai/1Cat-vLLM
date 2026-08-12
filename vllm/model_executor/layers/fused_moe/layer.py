@@ -131,6 +131,7 @@ class FusedMoE(PluggableLayer):
         expert_mapping: list[tuple[str, str, int, str]] | None = None,
         n_shared_experts: int | None = None,
         router_logits_dtype: torch.dtype | None = None,
+        output_dtype: torch.dtype | None = None,
         gate: torch.nn.Module | None = None,
         shared_experts: torch.nn.Module | None = None,
         shared_expert_gate: torch.nn.Module | None = None,
@@ -323,6 +324,7 @@ class FusedMoE(PluggableLayer):
             num_logical_experts=self.logical_num_experts,
             moe_parallel_config=self.moe_parallel_config,
             in_dtype=moe_in_dtype,
+            out_dtype=output_dtype,
             moe_backend=vllm_config.kernel_config.moe_backend,
             router_logits_dtype=router_logits_dtype,
             max_num_tokens=max_num_batched_tokens,
@@ -333,7 +335,6 @@ class FusedMoE(PluggableLayer):
             device=vllm_config.device_config.device,
             routing_method=self.routing_method_type,
             swiglu_limit=swiglu_limit,
-            # TODO: in_dtype == out_dtype?
         )
         if self.moe_config.use_mori_kernels:
             assert self.rocm_aiter_fmoe_enabled, (

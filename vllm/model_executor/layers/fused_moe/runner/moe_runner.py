@@ -263,7 +263,9 @@ def _moe_forward(
     input_ids: torch.Tensor | None,
     layer_name: _layer_name_type,
     hidden_dim_unpadded: int,
+    output_dtype: torch.dtype,
 ) -> torch.Tensor:
+    del output_dtype
     layer = get_layer_from_name(_resolve_layer_name(layer_name))
     return layer.runner._forward_impl(
         layer,
@@ -281,14 +283,17 @@ def _moe_forward_fake(
     input_ids: torch.Tensor | None,
     layer_name: _layer_name_type,
     hidden_dim_unpadded: int,
+    output_dtype: torch.dtype,
 ) -> torch.Tensor:
     # `hidden_dim_unpadded > 0` only on the TRT-LLM MXFP4 path, where the
     # real kernel writes narrower than `hidden_states.shape[-1]`. Plumbed
     # as an op arg (not peeked from the layer registry) to keep the fake
     # a pure shape function of its inputs and preserve subgraph dedup.
     if hidden_dim_unpadded > 0:
-        return hidden_states.new_empty((*hidden_states.shape[:-1], hidden_dim_unpadded))
-    return torch.empty_like(hidden_states)
+        return hidden_states.new_empty(
+            (*hidden_states.shape[:-1], hidden_dim_unpadded), dtype=output_dtype
+        )
+    return torch.empty_like(hidden_states, dtype=output_dtype)
 
 
 def _moe_forward_shared(
@@ -298,7 +303,9 @@ def _moe_forward_shared(
     input_ids: torch.Tensor | None,
     layer_name: _layer_name_type,
     hidden_dim_unpadded: int,
+    output_dtype: torch.dtype,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    del output_dtype
     layer = get_layer_from_name(_resolve_layer_name(layer_name))
     return layer.runner._forward_impl(
         layer,
@@ -316,20 +323,21 @@ def _moe_forward_shared_fake(
     input_ids: torch.Tensor | None,
     layer_name: _layer_name_type,
     hidden_dim_unpadded: int,
+    output_dtype: torch.dtype,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     # `fused_out`: see `_moe_forward_fake` for hidden_dim_unpadded semantics.
     # `shared_out`: matches `shared_experts_input` if provided (latent MoE),
     # else `hidden_states`.
     if hidden_dim_unpadded > 0:
         fused_out = hidden_states.new_empty(
-            (*hidden_states.shape[:-1], hidden_dim_unpadded)
+            (*hidden_states.shape[:-1], hidden_dim_unpadded), dtype=output_dtype
         )
     else:
-        fused_out = torch.empty_like(hidden_states)
+        fused_out = torch.empty_like(hidden_states, dtype=output_dtype)
     if shared_experts_input is not None:
-        shared_out = torch.empty_like(shared_experts_input)
+        shared_out = torch.empty_like(shared_experts_input, dtype=output_dtype)
     else:
-        shared_out = torch.empty_like(hidden_states)
+        shared_out = torch.empty_like(hidden_states, dtype=output_dtype)
     return shared_out, fused_out
 
 
@@ -601,6 +609,8 @@ class MoERunner(MoERunnerInterface):
         if shared_output is None:
             return False
         if envs.VLLM_SM70_QWEN38_DUAL_COMPILE and not use_sm70_decode_graph_semantics():
+            return False
+        if fused_output.dtype not in (torch.float16, torch.bfloat16):
             return False
         if not current_platform.is_cuda():
             return False
@@ -895,6 +905,7 @@ class MoERunner(MoERunnerInterface):
             input_ids,
             self._encode_layer_name(),
             self._trtllm_mxfp4_unpadded_dim(),
+            self.moe_config.out_dtype,
         )
 
         #

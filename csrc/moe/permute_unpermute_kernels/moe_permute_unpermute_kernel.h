@@ -95,9 +95,9 @@ void singleTokenMoePermuteLauncher(T const* input, int const* topk_ids,
 
 bool canUseSingleTokenMoeUnpermuteFastPath(int64_t n_token, int64_t topk);
 
-template <typename T>
+template <typename T, typename OutputType = T>
 void singleTokenMoeUnpermuteLauncher(
-    T const* expanded_permuted_rows, T* reduced_unpermuted_output,
+    T const* expanded_permuted_rows, OutputType* reduced_unpermuted_output,
     float const* scales, int const* expanded_source_row_to_expanded_dest_row,
     int64_t cols, int64_t topk, cudaStream_t stream);
 

@@ -216,11 +216,19 @@ void moe_unpermute(
     int64_t topk,
     torch::Tensor& hidden_states  // [n_token, hidden]
 ) {
+  bool const fp16_to_fp32 =
+      permuted_hidden_states.scalar_type() == at::ScalarType::Half &&
+      hidden_states.scalar_type() == at::ScalarType::Float;
   TORCH_CHECK(
-      permuted_hidden_states.scalar_type() == hidden_states.scalar_type(),
-      "permuted_hidden_states dtype must be same as hidden_states");
+      permuted_hidden_states.scalar_type() == hidden_states.scalar_type() ||
+          fp16_to_fp32,
+      "moe_unpermute supports matching dtypes or float16 input with "
+      "float32 output");
   auto n_token = hidden_states.size(0);
   auto n_hidden = hidden_states.size(1);
+  if (n_token == 0) {
+    return;
+  }
   auto stream = at::cuda::getCurrentCUDAStream().stream();
 
   int64_t const* valid_ptr = nullptr;
@@ -231,6 +239,13 @@ void moe_unpermute(
   }
 
   if (canUseSingleTokenMoeUnpermuteFastPath(n_token, topk)) {
+    if (fp16_to_fp32) {
+      singleTokenMoeUnpermuteLauncher<half, float>(
+          get_ptr<half>(permuted_hidden_states), get_ptr<float>(hidden_states),
+          get_ptr<float>(topk_weights), get_ptr<int>(inv_permuted_idx),
+          n_hidden, topk, stream);
+      return;
+    }
     if (hidden_states.scalar_type() == at::ScalarType::Half) {
       singleTokenMoeUnpermuteLauncher<half>(
           get_ptr<half>(permuted_hidden_states), get_ptr<half>(hidden_states),
@@ -252,6 +267,14 @@ void moe_unpermute(
           n_hidden, topk, stream);
       return;
     }
+  }
+
+  if (fp16_to_fp32) {
+    finalizeMoeRoutingKernelLauncher<half, float>(
+        get_ptr<half>(permuted_hidden_states), get_ptr<float>(hidden_states),
+        get_ptr<float>(topk_weights), get_ptr<int>(inv_permuted_idx), n_token,
+        n_hidden, topk, valid_ptr, stream);
+    return;
   }
 
   MOE_DISPATCH(hidden_states.scalar_type(), [&] {
