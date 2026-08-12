@@ -15,7 +15,7 @@ from vllm.tool_parsers.poolside_v1_tool_parser import PoolsideV1ToolParser
 
 
 @pytest.fixture
-def request():
+def chat_request():
     tools = [
         ChatCompletionToolsParam(
             function=FunctionDefinition(
@@ -47,12 +47,12 @@ def request():
     ids=["one-line", "multiline"],
 )
 @pytest.mark.parametrize("streaming", [False, True])
-def test_extract_weather_call(default_tokenizer, request, model_output, streaming):
-    parser = PoolsideV1ToolParser(default_tokenizer, tools=request.tools)
+def test_extract_weather_call(default_tokenizer, chat_request, model_output, streaming):
+    parser = PoolsideV1ToolParser(default_tokenizer, tools=chat_request.tools)
     content, tool_calls = run_tool_extraction(
         parser,
         model_output,
-        request=request,
+        request=chat_request,
         streaming=streaming,
     )
 
