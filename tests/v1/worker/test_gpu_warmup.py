@@ -50,9 +50,10 @@ def test_warmup_covers_scheduler_sized_serving_prefill(monkeypatch):
         kv_connector=MagicMock(),
     )
     execute_outputs = []
+    sample_outputs = []
     monkeypatch.setattr("torch.accelerator.synchronize", lambda: None)
 
-    warmup_kernels(model_runner, execute_outputs.append, lambda _: None)
+    warmup_kernels(model_runner, execute_outputs.append, sample_outputs.append)
 
     serving_output = next(
         output
@@ -67,3 +68,6 @@ def test_warmup_covers_scheduler_sized_serving_prefill(monkeypatch):
     assert set(serving_output.num_scheduled_tokens.values()) == {256}
     serving_ids = set(serving_output.num_scheduled_tokens)
     assert any(output.finished_req_ids == serving_ids for output in execute_outputs)
+    # The serving-sized pass compiles execute-model kernels without creating a
+    # scheduler-sized vocabulary-logits tensor.
+    assert len(sample_outputs) == 3
