@@ -1652,6 +1652,8 @@ class RowParallelLinear(LinearBase):
                         (e.g. model.layers.0.down_proj)
         return_bias: If true, return bias together with outputs in forward pass.
         disable_tp: If true, weights matrix won't be sharded through tp rank.
+        reduce_output_dtype: Optional dtype applied to each local output before
+                             tensor-parallel reduction.
     """
 
     # --8<-- [end:row_parallel_linear]
@@ -1670,6 +1672,7 @@ class RowParallelLinear(LinearBase):
         *,
         return_bias: bool = True,
         disable_tp: bool = False,
+        reduce_output_dtype: torch.dtype | None = None,
     ):
         # Divide the weight matrix along the first dimension.
         self.tp_rank = get_tensor_model_parallel_rank() if not disable_tp else 0
@@ -1692,6 +1695,7 @@ class RowParallelLinear(LinearBase):
 
         self.input_is_parallel = input_is_parallel
         self.reduce_results = reduce_results
+        self.reduce_output_dtype = reduce_output_dtype
 
         self.quant_method.create_weights(
             layer=self,
@@ -1786,21 +1790,27 @@ class RowParallelLinear(LinearBase):
         # bias will not get added more than once in TP>1 case)
         bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
         output = None
-        if self.reduce_results and self.tp_size > 1:
+        if (
+            self.reduce_results
+            and self.tp_size > 1
+            and self.reduce_output_dtype is None
+        ):
             output = _maybe_sm70_awq_mlp_down_tile_gemm_reduce(
                 self, input_parallel, bias_
             )
         if output is None:
             output_parallel = _maybe_sm70_dense_forward(self, input_parallel, bias_)
             if output_parallel is None:
-                output_parallel = self.quant_method.apply(
-                    self, input_parallel, bias_
-                )
+                output_parallel = self.quant_method.apply(self, input_parallel, bias_)
+            if self.reduce_output_dtype is not None:
+                output_parallel = output_parallel.to(self.reduce_output_dtype)
 
             if self.reduce_results and self.tp_size > 1:
-                output = _maybe_sm70_awq_mlp_down_tile_all_reduce(
-                    self, output_parallel
-                )
+                output = None
+                if self.reduce_output_dtype is None:
+                    output = _maybe_sm70_awq_mlp_down_tile_all_reduce(
+                        self, output_parallel
+                    )
                 if output is None:
                     output = tensor_model_parallel_all_reduce(output_parallel)
             else:
