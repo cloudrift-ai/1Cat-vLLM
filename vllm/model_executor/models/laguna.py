@@ -62,6 +62,33 @@ from vllm.sequence import IntermediateTensors
 logger = init_logger(__name__)
 
 
+def _laguna_output_dtype(model_dtype: torch.dtype) -> torch.dtype | None:
+    return torch.float32 if model_dtype == torch.float16 else None
+
+
+class LagunaRMSNorm(nn.Module):
+    """RMSNorm with a float32 residual stream and float16 normalized output."""
+
+    def __init__(self, hidden_size: int, eps: float) -> None:
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(hidden_size))
+        self.variance_epsilon = eps
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        residual: torch.Tensor | None = None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        has_residual = residual is not None
+        residual_output = (
+            x.float() if residual is None else residual.float() + x.float()
+        )
+        variance = residual_output.pow(2).mean(dim=-1, keepdim=True)
+        output = residual_output * torch.rsqrt(variance + self.variance_epsilon)
+        output = (output * self.weight.float()).to(torch.float16)
+        return (output, residual_output) if has_residual else output
+
+
 class LagunaMLP(nn.Module):
     """Dense MLP for Laguna (used in mlp_only_layers)."""
 
@@ -72,6 +99,7 @@ class LagunaMLP(nn.Module):
         hidden_act: str,
         quant_config: QuantizationConfig | None = None,
         reduce_results: bool = True,
+        output_dtype: torch.dtype | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -103,6 +131,7 @@ class LagunaMLP(nn.Module):
             bias=False,
             quant_config=quant_config,
             reduce_results=reduce_results,
+            reduce_output_dtype=output_dtype,
             prefix=f"{prefix}.down_proj",
         )
         if hidden_act != "silu":
@@ -148,6 +177,9 @@ class LagunaMoE(nn.Module):
         self.routed_scaling_factor = float(
             getattr(config, "moe_routed_scaling_factor", 1.0)
         )
+        self.output_dtype = _laguna_output_dtype(
+            get_current_vllm_config().model_config.dtype
+        )
 
         if self.tp_size > config.num_experts:
             raise ValueError(
@@ -191,6 +223,7 @@ class LagunaMoE(nn.Module):
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
                 reduce_results=False,  # Reduce after shared+routed combine
+                output_dtype=self.output_dtype,
                 prefix=f"{prefix}.shared_expert",
             )
         else:
@@ -229,6 +262,7 @@ class LagunaMoE(nn.Module):
             num_redundant_experts=self.n_redundant_experts,
             routed_scaling_factor=self.routed_scaling_factor,
             apply_routed_scale_to_output=True,
+            output_dtype=self.output_dtype,
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -272,6 +306,9 @@ class LagunaAttention(nn.Module):
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
+        self.output_dtype = _laguna_output_dtype(
+            get_current_vllm_config().model_config.dtype
+        )
         tp_size = get_tensor_model_parallel_world_size()
         self.total_num_heads = num_heads
         assert self.total_num_heads % tp_size == 0
@@ -317,6 +354,7 @@ class LagunaAttention(nn.Module):
             self.hidden_size,
             bias=config.attention_bias,
             quant_config=quant_config,
+            reduce_output_dtype=self.output_dtype,
             prefix=f"{prefix}.o_proj",
         )
 
@@ -472,6 +510,9 @@ class LagunaDecoderLayer(nn.Module):
         super().__init__()
         self.hidden_size = config.hidden_size
         layer_idx = extract_layer_index(prefix)
+        self.output_dtype = _laguna_output_dtype(
+            get_current_vllm_config().model_config.dtype
+        )
 
         # Determine if this layer uses sliding window attention
         layer_types = getattr(config, "layer_types", None)
@@ -528,11 +569,13 @@ class LagunaDecoderLayer(nn.Module):
                 intermediate_size=config.intermediate_size,
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
+                output_dtype=self.output_dtype,
                 prefix=f"{prefix}.mlp",
             )
 
-        self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.post_attention_layernorm = RMSNorm(
+        norm_cls = LagunaRMSNorm if self.output_dtype == torch.float32 else RMSNorm
+        self.input_layernorm = norm_cls(config.hidden_size, eps=config.rms_norm_eps)
+        self.post_attention_layernorm = norm_cls(
             config.hidden_size, eps=config.rms_norm_eps
         )
 
@@ -544,7 +587,11 @@ class LagunaDecoderLayer(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # Self Attention
         if residual is None:
-            residual = hidden_states
+            residual = (
+                hidden_states.float()
+                if self.output_dtype == torch.float32
+                else hidden_states
+            )
             hidden_states = self.input_layernorm(hidden_states)
         else:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
@@ -574,6 +621,7 @@ class LagunaModel(nn.Module, EagleModelMixin):
         self.num_redundant_experts = eplb_config.num_redundant_experts
         self.config = config
         self.quant_config = quant_config
+        self.output_dtype = _laguna_output_dtype(vllm_config.model_config.dtype)
 
         # Disable the model-level sliding-window fallback in Attention.__init__.
         # Laguna drives SWA per-layer via `layer_types`, passing
@@ -612,7 +660,8 @@ class LagunaModel(nn.Module, EagleModelMixin):
         )
 
         if get_pp_group().is_last_rank:
-            self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+            norm_cls = LagunaRMSNorm if self.output_dtype == torch.float32 else RMSNorm
+            self.norm = norm_cls(config.hidden_size, eps=config.rms_norm_eps)
         else:
             self.norm = PPMissingLayer()
 

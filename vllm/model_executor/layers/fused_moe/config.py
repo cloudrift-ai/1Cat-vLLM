@@ -1278,6 +1278,10 @@ class FusedMoEConfig:
     # The activation type.
     in_dtype: torch.dtype
 
+    # The final expert output type. Intermediate activations keep in_dtype.
+    # Defaults to in_dtype if not specified.
+    out_dtype: torch.dtype | None = None
+
     # Defaults to in_dtype if not specified.
     router_logits_dtype: torch.dtype | None = None
 
@@ -1316,6 +1320,8 @@ class FusedMoEConfig:
 
         if self.router_logits_dtype is None:
             self.router_logits_dtype = self.in_dtype
+        if self.out_dtype is None:
+            self.out_dtype = self.in_dtype
 
         if self.hidden_dim_unpadded is None:
             self.hidden_dim_unpadded = self.hidden_dim
