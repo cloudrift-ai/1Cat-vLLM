@@ -250,7 +250,6 @@ def _get_decode_workspace_for_plan(
         batch_capacity,
         num_heads,
         head_dim,
-        plan.partition_size,
     )
 
     workspace = _decode_workspace_cache.get(key) if _can_cache_workspace(q) else None

@@ -4,6 +4,8 @@
 import pytest
 import torch
 
+from vllm.platforms import current_platform
+
 flash_attn_v100 = pytest.importorskip("flash_attn_v100.flash_attn_interface")
 
 
@@ -13,10 +15,10 @@ def _clear_decode_caches() -> None:
 
 
 def _sm70_device_or_skip() -> torch.device:
-    if not torch.cuda.is_available():
+    if torch.accelerator.device_count() == 0:
         pytest.skip("CUDA is required")
-    for index in range(torch.cuda.device_count()):
-        if torch.cuda.get_device_capability(index) == (7, 0):
+    for index in range(torch.accelerator.device_count()):
+        if current_platform.get_device_capability(index) == (7, 0):
             return torch.device(f"cuda:{index}")
     pytest.skip("SM70/V100 CUDA device is required")
 
@@ -188,6 +190,51 @@ def test_static_decode_short_workspace_can_preserve_partition_boundaries(
     assert plan.workspace_num_partitions == 4
 
 
+def test_decode_workspace_reuses_capacity_across_partition_sizes() -> None:
+    _clear_decode_caches()
+
+    q = torch.empty((1, 8, 256), dtype=torch.float16)
+    k_cache = torch.empty((512, 16, 1, 256), dtype=torch.float16)
+    block_table = torch.zeros((1, 512), dtype=torch.int32)
+    long_plan = flash_attn_v100._get_decode_plan(
+        q,
+        k_cache,
+        block_table,
+        max_seq_len_hint=8192,
+        workspace_seq_capacity_hint=8192,
+        partition_size_hint=1024,
+    )
+    long_workspace = flash_attn_v100._get_decode_workspace_for_plan(
+        q,
+        batch_capacity=1,
+        num_heads=8,
+        head_dim=256,
+        plan=long_plan,
+    )
+    short_plan = flash_attn_v100._get_decode_plan(
+        q,
+        k_cache,
+        block_table,
+        max_seq_len_hint=1024,
+        workspace_seq_capacity_hint=1024,
+        partition_size_hint=256,
+    )
+    short_workspace = flash_attn_v100._get_decode_workspace_for_plan(
+        q,
+        batch_capacity=1,
+        num_heads=8,
+        head_dim=256,
+        plan=short_plan,
+    )
+
+    assert long_plan.partition_size != short_plan.partition_size
+    assert long_plan.workspace_num_partitions >= short_plan.workspace_num_partitions
+    assert long_workspace[0].data_ptr() == short_workspace[0].data_ptr()
+    assert long_workspace[1].data_ptr() == short_workspace[1].data_ptr()
+    assert long_workspace[2].data_ptr() == short_workspace[2].data_ptr()
+    assert len(flash_attn_v100._decode_workspace_cache) == 1
+
+
 @torch.inference_mode()
 def test_stale_active_num_partitions_does_not_truncate_decode(
     monkeypatch,
@@ -234,5 +281,5 @@ def test_stale_active_num_partitions_does_not_truncate_decode(
         active_num_partitions=stale_active,
     )
 
-    torch.cuda.synchronize(device)
+    torch.accelerator.synchronize(device=device)
     assert torch.equal(actual, expected)
