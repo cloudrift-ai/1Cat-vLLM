@@ -198,8 +198,10 @@ def warmup_kernels(
         )
         serving_output.num_common_prefix_blocks = [0] * num_kv_cache_groups
         worker_execute_model(serving_output)
-        if not model_runner.is_pooling_model:
-            worker_sample_tokens(None)
+
+        # This pass exists only to compile the attention specialization.  Sampling
+        # all prompt positions would materialize scheduler-sized vocabulary logits,
+        # an unnecessary peak after the KV cache has claimed its serving budget.
 
         serving_cleanup_output = SchedulerOutput.make_empty()
         serving_cleanup_output.finished_req_ids = set(serving_req_ids)
