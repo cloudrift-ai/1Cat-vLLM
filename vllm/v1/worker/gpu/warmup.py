@@ -32,8 +32,10 @@ def warmup_kernels(
     The first iteration simulates a prefill with requests of
     2 + num_spec_steps prompt tokens each. The second iteration simulates
     a decode step with all requests generating 1 + num_spec_steps tokens.
-    A final single-request prefill covers the material short-prompt shape
-    used by the serving health check before JIT monitoring begins.
+    A representative 256-token prefill batch covers the first serving batch
+    under high concurrency. A final single-request prefill covers the material
+    short-prompt shape used by the serving health check before JIT monitoring
+    begins.
     """
     num_spec_steps = model_runner.num_speculative_steps
     # Use 1 + num_spec_steps + 1 tokens so the prefill batch's per-request
@@ -151,6 +153,57 @@ def warmup_kernels(
     cleanup_output = SchedulerOutput.make_empty()
     cleanup_output.finished_req_ids = set(req_ids)
     worker_execute_model(cleanup_output)
+
+    # The maximally wide two-token prefill does not cover the unified-attention
+    # specialization selected when a high-concurrency serving workload begins
+    # with ordinary prompts. Warm one scheduler-sized 256-token prefill batch;
+    # this is bounded by the configured token, sequence, and KV-block limits.
+    serving_prompt_len = min(256, model_runner.scheduler_config.max_num_batched_tokens)
+    serving_block_counts = [cdiv(serving_prompt_len, bs) for bs in group_block_sizes]
+    serving_blocks_per_req = sum(serving_block_counts)
+    serving_num_reqs = min(
+        model_runner.scheduler_config.max_num_seqs,
+        model_runner.scheduler_config.max_num_batched_tokens
+        // max(serving_prompt_len, 1),
+        max(
+            1,
+            (model_runner.kv_cache_config.num_blocks - 1)
+            // max(serving_blocks_per_req, 1),
+        ),
+    )
+    if serving_prompt_len > prompt_len and serving_num_reqs > 0:
+        serving_req_ids = [f"_warmup_serving_{i}_" for i in range(serving_num_reqs)]
+        serving_token_ids = [0] * serving_prompt_len
+        next_block_id = 1
+        serving_reqs = [
+            NewRequestData.from_request(
+                Request(
+                    serving_req_ids[i],
+                    serving_token_ids,
+                    sampling_params,
+                    pooling_params,
+                ),
+                block_ids=tuple(_alloc_blocks(n) for n in serving_block_counts),
+                prefill_token_ids=serving_token_ids,
+            )
+            for i in range(serving_num_reqs)
+        ]
+        serving_output = SchedulerOutput.make_empty()
+        serving_output.scheduled_new_reqs = serving_reqs
+        serving_output.num_scheduled_tokens = {
+            req_id: serving_prompt_len for req_id in serving_req_ids
+        }
+        serving_output.total_num_scheduled_tokens = (
+            serving_prompt_len * serving_num_reqs
+        )
+        serving_output.num_common_prefix_blocks = [0] * num_kv_cache_groups
+        worker_execute_model(serving_output)
+        if not model_runner.is_pooling_model:
+            worker_sample_tokens(None)
+
+        serving_cleanup_output = SchedulerOutput.make_empty()
+        serving_cleanup_output.finished_req_ids = set(serving_req_ids)
+        worker_execute_model(serving_cleanup_output)
 
     # The two-token prefill above intentionally maximizes request count, but
     # Triton's attention and slot-mapping kernels specialize on the short
