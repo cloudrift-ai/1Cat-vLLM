@@ -473,9 +473,7 @@ def test_sm70_single_token_weighted_reduce_matches_moe_unpermute():
         )
         topk_weights = torch.randn((1, topk), device=device, dtype=torch.float32)
         dummy_hidden = torch.randn((1, hidden), device=device, dtype=torch.float16)
-        _, _, offsets, inv, _ = moe_permute(
-            dummy_hidden, None, topk_ids, n_expert
-        )
+        _, _, offsets, inv, _ = moe_permute(dummy_hidden, None, topk_ids, n_expert)
         sorted_output_storage = torch.randn(
             (topk, hidden + pad), device=device, dtype=torch.float16
         )
@@ -483,12 +481,8 @@ def test_sm70_single_token_weighted_reduce_matches_moe_unpermute():
 
         expected = torch.empty((1, hidden), device=device, dtype=torch.float16)
         actual = torch.empty_like(expected)
-        reference_sorted_output = (
-            sorted_output.contiguous() if pad else sorted_output
-        )
-        moe_unpermute(
-            expected, reference_sorted_output, topk_weights, inv, offsets
-        )
+        reference_sorted_output = sorted_output.contiguous() if pad else sorted_output
+        moe_unpermute(expected, reference_sorted_output, topk_weights, inv, offsets)
         torch.ops._C.awq_moe_single_token_weighted_reduce_out(
             sorted_output,
             topk_weights,
@@ -503,3 +497,57 @@ def test_sm70_single_token_weighted_reduce_matches_moe_unpermute():
                 "single-token weighted-reduce mismatch "
                 f"name={name} max_diff={float(diff.max().item())}"
             )
+
+
+@pytest.mark.parametrize(("n_token", "hidden"), [(1, 16), (3, 24)])
+def test_moe_unpermute_accumulates_half_routes_into_float_output(
+    n_token: int, hidden: int
+):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required for MoE unpermute")
+    current_platform.import_kernels()
+    if not moe_permute_unpermute_supported():
+        pytest.skip("moe_permute_unpermute is not supported on this platform.")
+
+    topk = 10
+    topk_ids = torch.tensor(
+        [[7, 2, 7, 0, 63, 1, 2, 4, 8, 8]],
+        device="cuda",
+        dtype=torch.int64,
+    ).expand(n_token, -1)
+    topk_weights = torch.full((n_token, topk), 0.2, device="cuda", dtype=torch.float32)
+    dummy_hidden = torch.zeros((n_token, hidden), device="cuda", dtype=torch.float16)
+    _, _, offsets, inv, _ = moe_permute(dummy_hidden, None, topk_ids, 64)
+    expert_rows = torch.full(
+        (n_token * topk, hidden), 40000.0, device="cuda", dtype=torch.float16
+    )
+    output = torch.empty((n_token, hidden), device="cuda", dtype=torch.float32)
+
+    moe_unpermute(output, expert_rows, topk_weights, inv, offsets)
+
+    assert torch.isfinite(output).all()
+    torch.testing.assert_close(
+        output,
+        torch.full_like(output, 80000.0),
+        atol=16.0,
+        rtol=0,
+    )
+
+
+def test_moe_unpermute_accepts_empty_half_input_with_float_output():
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required for MoE unpermute")
+    current_platform.import_kernels()
+    if not moe_permute_unpermute_supported():
+        pytest.skip("moe_permute_unpermute is not supported on this platform.")
+
+    output = torch.empty((0, 16), device="cuda", dtype=torch.float32)
+    moe_unpermute(
+        output,
+        torch.empty((0, 16), device="cuda", dtype=torch.float16),
+        torch.empty((0, 10), device="cuda", dtype=torch.float32),
+        torch.empty((0, 10), device="cuda", dtype=torch.int32),
+        torch.zeros((65,), device="cuda", dtype=torch.int64),
+    )
+
+    assert output.shape == (0, 16)

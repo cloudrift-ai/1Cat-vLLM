@@ -80,17 +80,18 @@ bool canUseSingleTokenMoePermuteFastPath(int64_t n_token, int64_t topk,
                                          int64_t n_local_expert);
 
 template <typename T>
-void singleTokenMoePermuteLauncher(
-    T const* input, int const* topk_ids, T* permuted_output,
-    int64_t* expert_first_token_offset, int* inv_permuted_idx,
-    int* permuted_idx, int num_experts, int topk, int64_t cols,
-    cudaStream_t stream);
+void singleTokenMoePermuteLauncher(T const* input, int const* topk_ids,
+                                   T* permuted_output,
+                                   int64_t* expert_first_token_offset,
+                                   int* inv_permuted_idx, int* permuted_idx,
+                                   int num_experts, int topk, int64_t cols,
+                                   cudaStream_t stream);
 
 bool canUseSingleTokenMoeUnpermuteFastPath(int64_t n_token, int64_t topk);
 
-template <typename T>
+template <typename T, typename OutputType = T>
 void singleTokenMoeUnpermuteLauncher(
-    T const* expanded_permuted_rows, T* reduced_unpermuted_output,
+    T const* expanded_permuted_rows, OutputType* reduced_unpermuted_output,
     float const* scales, int const* expanded_source_row_to_expanded_dest_row,
     int64_t cols, int64_t topk, cudaStream_t stream);
 

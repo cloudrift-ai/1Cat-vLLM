@@ -453,7 +453,10 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         self.moe_sum(intermediate_cache3, output)
 
     def moe_sum(self, input: torch.Tensor, output: torch.Tensor) -> None:
-        ops.moe_sum(input, output)
+        if input.dtype == output.dtype:
+            ops.moe_sum(input, output)
+        else:
+            torch.sum(input, dim=1, out=output)
 
 
 class TritonWNA16Experts(TritonExperts):

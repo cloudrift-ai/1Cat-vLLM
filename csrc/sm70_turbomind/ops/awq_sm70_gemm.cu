@@ -4846,8 +4846,21 @@ std::vector<torch::Tensor> awq_moe_build_strided_ptrs(
               "awq_moe_build_strided_ptrs: weights must be CUDA.");
   TORCH_CHECK(tm_scales.is_cuda(),
               "awq_moe_build_strided_ptrs: scales must be CUDA.");
+  TORCH_CHECK(tm_weights.get_device() == tm_scales.get_device(),
+              "awq_moe_build_strided_ptrs: weights and scales must be on the "
+              "same CUDA device.");
+  TORCH_CHECK(tm_weights.dim() >= 1,
+              "awq_moe_build_strided_ptrs: weights must have rank >= 1.");
+  TORCH_CHECK(tm_scales.dim() >= 1,
+              "awq_moe_build_strided_ptrs: scales must have rank >= 1.");
   TORCH_CHECK(num_experts > 0,
               "awq_moe_build_strided_ptrs: num_experts must be > 0.");
+  TORCH_CHECK(num_experts <= std::numeric_limits<int>::max(),
+              "awq_moe_build_strided_ptrs: num_experts exceeds int range.");
+  TORCH_CHECK(k_ld > 0 && k_ld <= std::numeric_limits<int>::max(),
+              "awq_moe_build_strided_ptrs: k_ld must fit a positive int.");
+  TORCH_CHECK(q_ld > 0 && q_ld <= std::numeric_limits<int>::max(),
+              "awq_moe_build_strided_ptrs: q_ld must fit a positive int.");
   TORCH_CHECK(tm_weights.size(0) == num_experts,
               "awq_moe_build_strided_ptrs: weights dim0 != num_experts.");
   TORCH_CHECK(tm_scales.size(0) == num_experts,
@@ -4874,25 +4887,15 @@ std::vector<torch::Tensor> awq_moe_build_strided_ptrs(
     s_ptrs.emplace_back(s_base + e * s_expert_stride, static_cast<int>(q_ld));
   }
 
-  // MakeStridedPtrs allocates GPU memory via cudaMallocAsync
-  void* w_gpu = turbomind::gemm::MakeStridedPtrs(w_ptrs, stream);
-  void* s_gpu = turbomind::gemm::MakeStridedPtrs(s_ptrs, stream);
-
-  // Wrap in torch tensors for lifetime management.
   // StridedPtr is 16 bytes (__align__(16): void* ptr + int stride + padding).
   const int64_t buf_bytes = num_experts * 16;
   auto opts =
       torch::TensorOptions().device(tm_weights.device()).dtype(torch::kUInt8);
-
-  // Copy into torch-managed tensors so cudaFree of the original is safe.
   auto w_tensor = torch::empty({buf_bytes}, opts);
   auto s_tensor = torch::empty({buf_bytes}, opts);
-  cudaMemcpyAsync(w_tensor.data_ptr(), w_gpu, buf_bytes,
-                  cudaMemcpyDeviceToDevice, stream);
-  cudaMemcpyAsync(s_tensor.data_ptr(), s_gpu, buf_bytes,
-                  cudaMemcpyDeviceToDevice, stream);
-  cudaFreeAsync(w_gpu, stream);
-  cudaFreeAsync(s_gpu, stream);
+  turbomind::gemm::FillStridedPtrs(w_ptrs, w_tensor.data_ptr(), stream);
+  turbomind::gemm::FillStridedPtrs(s_ptrs, s_tensor.data_ptr(), stream);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
 
   return {w_tensor, s_tensor};
 }
